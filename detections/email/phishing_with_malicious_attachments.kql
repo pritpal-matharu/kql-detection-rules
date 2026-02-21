@@ -1,0 +1,55 @@
+// Title: Phishing Emails with Malicious Attachments and URL Threats
+// Data source: EmailEvents
+// MITRE: T1566 - Phishing, T1598 - Phishing for Information
+// Description: Detects phishing emails with malicious attachments or URLs
+// targeting multiple recipients, indicating a phishing campaign
+
+EmailEvents
+| join kind=inner (
+    EmailAttachmentInfo
+    | where isnotempty(FileName)
+    | extend 
+        FileName_lower = tolower(FileName),
+        FileExtension = extract(@'(\.\w+)$', 1, FileName_lower)
+    | where FileExtension in~ (".exe", ".scr", ".bat", ".cmd", ".vbs", ".js", ".zip", ".rar", ".7z")
+    | distinct NetworkMessageId, FileName, FileExtension
+) on NetworkMessageId
+| join kind=inner (
+    UrlClickEvents
+    | where isnotempty(Url)
+    | where ThreatTypes has_any ("Malware", "Phishing", "PUA")
+    | distinct NetworkMessageId, Url, ThreatTypes
+) on NetworkMessageId
+| extend 
+    SenderDomain = extract(@'@([^\s]+)', 1, SenderFromAddress),
+    RecipientDomain = extract(@'@([^\s]+)', 1, RecipientEmailAddress)
+| where 
+    SenderDomain != RecipientDomain  // External sender
+    and not (SenderDomain has_any ("microsoft.com", "microsoft.co.uk"))  // Exclude Microsoft
+    and not (SenderFromAddress has_any ("noreply", "support@"))  // Exclude automations
+| summarize 
+    RecipientCount = dcount(RecipientEmailAddress),
+    MaliciousAttachments = make_set(FileName),
+    ThreatUrls = make_set(Url),
+    Threats = make_set(ThreatTypes),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by SenderFromAddress, SenderDomain, Subject
+| where RecipientCount >= 3  // Alert on campaign targeting 3+ users
+| extend 
+    RiskLevel = iff(
+        RecipientCount >= 10,
+        "CRITICAL",
+        iff(RecipientCount >= 5, "HIGH", "MEDIUM")
+    )
+| project 
+    TimeGenerated = FirstSeen,
+    SenderFromAddress,
+    SenderDomain,
+    Subject,
+    RecipientCount,
+    RiskLevel,
+    MaliciousAttachments,
+    ThreatUrls,
+    Threats
+| sort by RecipientCount desc
