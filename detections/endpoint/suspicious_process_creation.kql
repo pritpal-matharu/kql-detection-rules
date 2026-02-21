@@ -1,0 +1,33 @@
+// Title: Suspicious Process Creation from System Directories
+// Data source: DeviceProcessEvents
+// MITRE: T1036 - Masquerading, T1202 - Indirect Command Execution
+// Description: Detects when system processes are created from unusual directories
+// This can indicate process masquerading or indirect execution attempts
+
+DeviceProcessEvents
+| where isnotempty(ProcessCommandLine)
+| where ProcessId != InitiatingProcessId  // Filter out parent process logs
+| extend ProcessPath = tolower(FolderPath)
+| where 
+    // Detect processes created from temp/download directories
+    ProcessPath contains @"\appdata\local\temp" or
+    ProcessPath contains @"\appdata\locallow" or
+    ProcessPath contains @"\windows\temp" or
+    ProcessPath contains @"downloads\" or
+    ProcessPath contains @"\recycler\" or
+    // Detect suspicious named pipes
+    ProcessCommandLine contains "pipe\\" or
+    // Detect encoded commands (common obfuscation)
+    ProcessCommandLine contains "-enc" or
+    ProcessCommandLine contains "-encodedcommand"
+| where 
+    // Exclude common legitimate processes
+    not (FileName in~ ("dism.exe", "msiexec.exe", "repair-bde.exe", "powershell.exe"))
+    and not (InitiatingProcessFileName =~ "windows update" or InitiatingProcessFileName =~ "wsus")
+| summarize 
+    ProcessCount = dcount(ProcessId),
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp)
+    by DeviceName, FileName, ProcessCommandLine, ProcessPath, AccountName
+| where ProcessCount >= 2  // Alert if process appears multiple times
+| sort by LastSeen desc
