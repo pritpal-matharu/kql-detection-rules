@@ -1,0 +1,48 @@
+// Title: Suspicious Azure Resource Deletion Activity
+// Data source: AzureActivity
+// MITRE: T1485 - Data Destruction, T1531 - Account Access Removal
+// Description: Detects suspicious bulk deletion of Azure resources which could indicate
+// an attacker attempting to destroy evidence or disable security controls
+
+AzureActivity
+| where OperationName has_any (
+    "Delete",
+    "Remove"
+)
+| where ActivityStatus == "Succeeded"
+| extend 
+    ResourceType = tolower(case(
+        ResourceId contains "storageaccounts", "Storage Account",
+        ResourceId contains "virtualMachines", "Virtual Machine",
+        ResourceId contains "networkSecurityGroups", "NSG",
+        ResourceId contains "vaults", "Key Vault",
+        ResourceId contains "databaseAccounts", "Cosmos DB",
+        "Other"
+    )),
+    Caller = tolower(Caller)
+| where ResourceType != "Other"  // Focus on known resource types
+| summarize 
+    DeletionCount = count(),
+    ResourceTypes = make_set(ResourceType, 100),
+    FirstActivity = min(TimeGenerated),
+    LastActivity = max(TimeGenerated),
+    Operations = make_set(OperationName, 50)
+    by Caller, SubscriptionId, bin(TimeGenerated, 1h)
+| where DeletionCount >= 5  // Alert if 5+ deletions in 1 hour
+| extend 
+    HighRisk = iff(
+        DeletionCount >= 10,
+        "CRITICAL",
+        iff(DeletionCount >= 5, "HIGH", "MEDIUM")
+    )
+| project 
+    TimeGenerated,
+    Caller,
+    SubscriptionId,
+    DeletionCount,
+    HighRisk,
+    ResourceTypes,
+    Operations,
+    FirstActivity,
+    LastActivity
+| sort by DeletionCount desc
