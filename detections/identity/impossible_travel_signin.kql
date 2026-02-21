@@ -1,0 +1,56 @@
+// Title: Impossible Travel - Sign-in from Geographically Distant Locations
+// Data source: SigninLogs
+// MITRE: T1078 - Valid Accounts, T1556 - Modify Authentication Process
+// Description: Detects when a user signs in from locations that are geographically 
+// too far apart in a short time window (impossible travel)
+
+SigninLogs
+| where ResultType == 0  // Successful sign-ins only
+| extend LocationKey = strcat(Country, "-", State, "-", City)
+| extend SigninTime = bin(TimeGenerated, 1h)  // Bin into 1-hour buckets
+| sort by UserPrincipalName, TimeGenerated
+| extend 
+    PrevLocation = prev(LocationKey, 1),
+    PrevSigninTime = prev(TimeGenerated, 1),
+    PrevCountry = prev(Country, 1),
+    PrevCity = prev(City, 1)
+| where PrevLocation != ""  // Only if there's a previous sign-in
+| where UserPrincipalName == prev(UserPrincipalName, 1)  // Same user
+| where LocationKey != PrevLocation  // Different location
+| extend 
+    TimeDiffMinutes = datetime_diff('minute', TimeGenerated, PrevSigninTime),
+    DistanceKm = iff(
+        PrevCountry == Country,
+        100,  // Same country, assume max 100km
+        iff(
+            (PrevCountry == "US" and Country == "US") or 
+            (PrevCountry == "CA" and Country == "CA"),
+            100,
+            6371  // Earth radius for rough distance calc
+        )
+    )
+| extend 
+    RequiredSpeed = DistanceKm / (TimeDiffMinutes / 60.0)  // km/hour
+| where 
+    TimeDiffMinutes > 0 and 
+    TimeDiffMinutes < 480 and  // Within 8 hours
+    RequiredSpeed > 900  // Speed greater than 900 km/h (impossible for commercial travel)
+| project 
+    TimeGenerated,
+    UserPrincipalName,
+    AppDisplayName,
+    PrevCity,
+    City,
+    PrevCountry,
+    Country,
+    TimeDiffMinutes,
+    RequiredSpeed,
+    IPAddress,
+    UserAgent,
+    ConditionalAccessPolicies
+| summarize 
+    SigninCount = count(),
+    FirstImpossibleTravel = min(TimeGenerated),
+    LastImpossibleTravel = max(TimeGenerated)
+    by UserPrincipalName, AppDisplayName
+| sort by SigninCount desc
