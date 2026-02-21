@@ -1,0 +1,55 @@
+// Title: IP Address Threat Intelligence Enrichment Function
+// Description: Reusable KQL function to enrich IP addresses with threat intelligence data
+// Usage: enrich_ip_threat_intel(IPAddress, data_source_table)
+// Returns: IP address with threat level (suspicious, malicious, clean) and threat count
+
+let enrich_ip_threat_intel = (
+    ip_col: string,
+    data_source: dynamic
+) {
+    // Known malicious IP ranges (example - in production use ThreatIntelligenceLogs)
+    let malicious_ips = datatable(ip_range: string, threat_type: string, severity: string)
+    [
+        "192.0.2.0/24", "botnet_c2", "high",
+        "198.51.100.0/24", "malware_distribution", "critical",
+        "203.0.113.0/24", "phishing_infrastructure", "high",
+    ];
+    
+    // Known clean CDN and cloud providers
+    let clean_ips = datatable(ip_pattern: string, provider: string)
+    [
+        "8.8.8.8", "Google DNS",
+        "1.1.1.1", "Cloudflare DNS",
+        "13.0.0.0/8", "Microsoft Azure",
+        "52.0.0.0/6", "Amazon AWS",
+    ];
+    
+    data_source
+    | extend 
+        IPaddress = column_ifexists(ip_col, "")
+    | where isnotempty(IPaddress)
+    | extend 
+        is_private_ip = IPaddress matches regex @'^(10|172\.(1[6-9]|2[0-9]|3[01])|192\.168|127|169\.254).*',
+        is_ipv6 = IPaddress matches regex @'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+    | extend 
+        threat_level = case(
+            is_private_ip, "clean",
+            is_ipv6, "unknown",
+            IPaddress in (clean_ips), "clean",
+            IPaddress in (malicious_ips), "malicious",
+            "suspicious"  // Default for unknown IPs
+        )
+    | extend 
+        severity = case(
+            threat_level == "clean", "low",
+            threat_level == "malicious", "critical",
+            threat_level == "suspicious", "medium",
+            "unknown"
+        )
+};
+
+// Example usage:
+// SigninLogs
+// | invoke enrich_ip_threat_intel("IPAddress")
+// | where threat_level == "malicious"
+// | project TimeGenerated, UserPrincipalName, IPaddress, threat_level, severity
